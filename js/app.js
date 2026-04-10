@@ -687,10 +687,17 @@ function clamp(value, min, max){
     }
     async function loadCachedStatsFromServer(){
       const response = await fetch("/api/cached-player-stats");
-      if(!response.ok) throw new Error(`Local server returned HTTP ${response.status}`);
-      const payload = await response.json();
-      if(!payload.ok) throw new Error(payload.error || "Could not load cached stats");
-      return payload.stats || {};
+      if(response.ok){
+        const payload = await response.json();
+        if(!payload.ok) throw new Error(payload.error || "Could not load cached stats");
+        return payload.stats || {};
+      }
+      if(response.status === 404){
+        const staticResponse = await fetch("/data/player-stats-public.json");
+        if(!staticResponse.ok) throw new Error(`Hosted snapshot returned HTTP ${staticResponse.status}`);
+        return normalizePlayerStatsPayload(await staticResponse.json());
+      }
+      throw new Error(`Local server returned HTTP ${response.status}`);
     }
     function renderImportedStatsSummary(){
       const importedCount = getStoredApiCount();
@@ -734,6 +741,28 @@ function clamp(value, min, max){
         })
       });
       if(!response.ok){
+        if(response.status === 404){
+          const hostedSnapshot = await loadCachedStatsFromServer();
+          importedPlayerStats = { ...importedPlayerStats, ...hostedSnapshot };
+          importedPlayerStatsMeta = {
+            syncedAt: new Date().toISOString(),
+            totalPlayers: trackedPlayers.length,
+            foundPlayers: Object.keys(importedPlayerStats).length,
+            missingPlayers: [],
+            failedPlayers: [],
+            pendingPlayers: [],
+            nextSyncIndex: 0
+          };
+          saveStoredPlayerStats(importedPlayerStats);
+          saveStoredStatsMeta(importedPlayerStatsMeta);
+          resetImportedProfileCache();
+          renderImportedStatsSummary();
+          renderPlayers();
+          updateBestSquadSummary();
+          if(syncStatsBtn) syncStatsBtn.disabled = false;
+          updateStatsImportStatus(`Hosted site loaded ${Object.keys(importedPlayerStats).length} bundled player profiles. Fresh live re-sync still needs the local Node server/backend.`, "success");
+          return;
+        }
         if(syncStatsBtn) syncStatsBtn.disabled = false;
         throw new Error(`Local server returned HTTP ${response.status}`);
       }
