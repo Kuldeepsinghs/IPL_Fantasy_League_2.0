@@ -539,6 +539,16 @@ function clamp(value, min, max){
       const viewerUid = getCurrentGuestUser() && getCurrentGuestUser().uid;
       return !!(currentRoomData && viewerUid && currentRoomData.hostUid === viewerUid);
     }
+    function getOrderedRoomMembers(){
+      const members = currentRoomData && Array.isArray(currentRoomData.members) ? currentRoomData.members.slice() : [];
+      return members.sort((a, b)=>{
+        if((a && a.uid) === (currentRoomData && currentRoomData.hostUid)) return -1;
+        if((b && b.uid) === (currentRoomData && currentRoomData.hostUid)) return 1;
+        const aTime = Date.parse((a && a.joinedAt) || "") || 0;
+        const bTime = Date.parse((b && b.joinedAt) || "") || 0;
+        return aTime - bTime;
+      });
+    }
     function getOnlineIdentityName(){
       return String((onlinePlayerNameInput && onlinePlayerNameInput.value) || "").trim();
     }
@@ -546,6 +556,10 @@ function clamp(value, min, max){
       if(!currentRoomId) return true;
       if(isCurrentUserHost()) return true;
       const currentPlayer = players[currentPlayerIndex];
+      const viewerUid = getCurrentGuestUser() && getCurrentGuestUser().uid;
+      if(currentPlayer && currentPlayer.ownerUid && viewerUid){
+        return currentPlayer.ownerUid === viewerUid;
+      }
       const identityName = getOnlineIdentityName();
       return !!(currentPlayer && identityName && currentPlayer.name.toLowerCase() === identityName.toLowerCase());
     }
@@ -970,7 +984,7 @@ function clamp(value, min, max){
 
     setupForm.addEventListener("submit", e=>{
       e.preventDefault();
-      const n = parseInt(numPlayersInput.value,10);
+      let n = parseInt(numPlayersInput.value,10);
       if(isNaN(n)||n<2){ alert("Enter at least 2 players."); return; }
       const parsedMaxPerTeam = parseInt(maxPerTeamInput && maxPerTeamInput.value, 10);
       if(Number.isNaN(parsedMaxPerTeam) || parsedMaxPerTeam < 1 || parsedMaxPerTeam > SQUAD_SIZE){
@@ -980,14 +994,31 @@ function clamp(value, min, max){
       maxPlayersPerTeam = parsedMaxPerTeam;
       const namesText = playerNamesTextarea.value.trim();
       let names=[];
-      if(namesText) names = namesText.split(",").map(s=>s.trim()).filter(Boolean);
+      if(currentRoomId && currentRoomData){
+        const roomMembers = getOrderedRoomMembers().filter(member => member && member.uid && member.name);
+        if(roomMembers.length >= 2){
+          n = roomMembers.length;
+          numPlayersInput.value = String(n);
+          names = roomMembers.map(member=>member.name);
+          playerNamesTextarea.value = names.join(", ");
+        }
+      }
+      if(names.length===0 && namesText) names = namesText.split(",").map(s=>s.trim()).filter(Boolean);
       if(names.length===0){
         for(let i=0;i<n;i++) names.push("Player "+(i+1));
       } else if(names.length!==n){
         alert("Number of names doesn't match.");
         return;
       }
-      players = names.map(name=>({name,squad:[],playing:null}));
+      players = names.map((name, index)=>{
+        const roomMember = currentRoomId && currentRoomData ? getOrderedRoomMembers()[index] : null;
+        return {
+          name,
+          squad:[],
+          playing:null,
+          ownerUid: roomMember && roomMember.uid ? roomMember.uid : null
+        };
+      });
       dynamicPlayerState = {};
       seasonStats = createEmptySeasonStats();
       rivalryStats = {};
