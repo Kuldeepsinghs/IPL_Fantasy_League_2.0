@@ -667,6 +667,16 @@ function clamp(value, min, max){
         renderOnlineRoomState();
       });
     }
+    function toggleCollapsibleFromClick(event){
+      const header = event.target.closest(".collapsible");
+      if(!header) return;
+      const block = header.closest(".match-block");
+      if(!block) return;
+      const panelCandidates = Array.from(block.children).filter(child => child !== header && child.tagName === "DIV");
+      const panel = panelCandidates[panelCandidates.length - 1];
+      if(!panel) return;
+      panel.style.display = panel.style.display === "none" ? "" : "none";
+    }
     function getStoredApiCount(){
       return Object.keys(importedPlayerStats || {}).length;
     }
@@ -3203,7 +3213,6 @@ function clamp(value, min, max){
       outer.appendChild(title);
       const boardHolder = document.createElement("div"); boardHolder.style.display="none";
       outer.appendChild(boardHolder);
-      title.addEventListener("click", ()=> { boardHolder.style.display = boardHolder.style.display === "none" ? "" : "none"; });
       renderScoreboardBlock(res, boardHolder);
       simResult.appendChild(outer);
       syncRoomGameState("single-sim");
@@ -3211,6 +3220,8 @@ function clamp(value, min, max){
 
     // clear scoreboards
     clearScoreboards.addEventListener("click", ()=>{ if(!canCurrentDeviceControlMatches()) return; simResult.innerHTML = ""; tournamentResult.innerHTML = ""; tossResultLine.textContent = ""; leagueFlow = null; playNextMatchBtn.disabled = true; syncRoomGameState("clear-scoreboards"); });
+    simResult.addEventListener("click", toggleCollapsibleFromClick);
+    tournamentResult.addEventListener("click", toggleCollapsibleFromClick);
 
     function renderPointsTable(table){
       const wrap = document.createElement("div");
@@ -3243,7 +3254,6 @@ function clamp(value, min, max){
       tossMeta.textContent = buildTossSummaryLine(matchRes);
       block.appendChild(tossMeta);
       const board = document.createElement("div"); board.style.display = "none"; block.appendChild(board);
-      head.addEventListener("click", ()=> { board.style.display = board.style.display === "none" ? "" : "none"; });
       renderScoreboardBlock(matchRes, board);
       container.appendChild(block);
     }
