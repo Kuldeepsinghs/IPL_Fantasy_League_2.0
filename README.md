@@ -1,4 +1,5 @@
 # 🏏 IPL Fantasy League
+Make your dreamed ipl team and play a match
 
 🚀 Live Demo:
 https://ipl-fantasy-league-omega.vercel.app/
