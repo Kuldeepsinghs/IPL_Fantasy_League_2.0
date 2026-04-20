@@ -1,6 +1,6 @@
 ﻿import { IPL_TEAMS, ANY_TEAM_OPTION, WHEEL_SEGMENTS, WHEEL_COLORS, IPL_PLAYERS, SQUAD_SIZE, MAX_PER_TEAM, MAX_FOREIGN, FOREIGN_PLAYERS, ROLE_BASE, ROLE_GROUPS, FORM_PLAYERS, PLAYER_RECORD_CAPS, DEFAULT_MAX_RUNS, DEFAULT_MAX_WICKETS, PLAYER_STATS_STORAGE_KEY, PLAYER_STATS_META_STORAGE_KEY, PLAYER_SYNC_BATCH_SIZE, COMPETITION_WEIGHTS, BAT_SR_PROFILES, OPENER_SPECIALISTS, MIDDLE_ORDER_SPECIALISTS, FINISHER_SPECIALISTS, BOWL_ECON_PROFILES, BOWL_WICKET_SKILL } from "./constants.js";
 
-import { watchGuestAuth, ensureGuestSession, getCurrentGuestUser, createRoom, joinRoom, subscribeToRoom, updateRoomSettings, updateRoomGameState } from "./firebase.js";
+import { watchGuestAuth, ensureGuestSession, getCurrentGuestUser, createRoom, joinRoom, subscribeToRoom, updateRoomSettings, updateRoomGameState, updateRoomPresence, transferRoomHost, sendRoomChatMessage } from "./firebase.js";
 
 function clamp(value, min, max){
       return Math.max(min, Math.min(max, value));
@@ -417,11 +417,14 @@ function clamp(value, min, max){
     let latestPicks = [];
     let auctionState = null;
     let auctionTimerInterval = null;
+    let auctionSaleTimeout = null;
+    let presenceInterval = null;
     let maxPlayersPerTeam = MAX_PER_TEAM;
     let currentGameMode = "spin";
     let currentRoomId = "";
     let currentRoomUnsubscribe = null;
     let currentRoomData = null;
+    let lastAppliedRoomGameStateJson = "";
     let applyingRemoteRoomState = false;
 
     // DOM refs
@@ -477,10 +480,14 @@ function clamp(value, min, max){
     const statsDashboard = document.getElementById("statsDashboard");
     const rivalryBoard = document.getElementById("rivalryBoard");
     const clearScoreboards = document.getElementById("clearScoreboards");
+    const auctionSetSelect = document.getElementById("auctionSetSelect");
+    const auctionSetOrderSelect = document.getElementById("auctionSetOrderSelect");
+    const auctionNextSetBtn = document.getElementById("auctionNextSetBtn");
     const auctionInitBtn = document.getElementById("auctionInitBtn");
     const auctionStartBtn = document.getElementById("auctionStartBtn");
     const auctionPauseBtn = document.getElementById("auctionPauseBtn");
     const auctionNextBtn = document.getElementById("auctionNextBtn");
+    const auctionEndBtn = document.getElementById("auctionEndBtn");
     const auctionStatusLine = document.getElementById("auctionStatusLine");
     const auctionPlayerAvatar = document.getElementById("auctionPlayerAvatar");
     const auctionSetBadge = document.getElementById("auctionSetBadge");
@@ -490,15 +497,40 @@ function clamp(value, min, max){
     const auctionCurrentBid = document.getElementById("auctionCurrentBid");
     const auctionHighestBidder = document.getElementById("auctionHighestBidder");
     const auctionTimer = document.getElementById("auctionTimer");
+    const auctionBidAsSelect = document.getElementById("auctionBidAsSelect");
     const auctionBidBtn = document.getElementById("auctionBidBtn");
+    const auctionBid10Btn = document.getElementById("auctionBid10Btn");
+    const auctionBid25Btn = document.getElementById("auctionBid25Btn");
+    const auctionBid50Btn = document.getElementById("auctionBid50Btn");
+    const auctionBid100Btn = document.getElementById("auctionBid100Btn");
     const auctionBidHint = document.getElementById("auctionBidHint");
+    const auctionSaleBanner = document.getElementById("auctionSaleBanner");
+    const auctionPlayerProfile = document.getElementById("auctionPlayerProfile");
     const auctionBidHistory = document.getElementById("auctionBidHistory");
     const auctionLotHistory = document.getElementById("auctionLotHistory");
     const auctionLeaderboard = document.getElementById("auctionLeaderboard");
     const auctionTeamsBoard = document.getElementById("auctionTeamsBoard");
+    const auctionPresence = document.getElementById("auctionPresence");
+    const hostTransferSelect = document.getElementById("hostTransferSelect");
+    const hostTransferBtn = document.getElementById("hostTransferBtn");
+    const auctionChatList = document.getElementById("auctionChatList");
+    const auctionChatInput = document.getElementById("auctionChatInput");
+    const auctionChatSendBtn = document.getElementById("auctionChatSendBtn");
+    const tradeTeamASelect = document.getElementById("tradeTeamASelect");
+    const tradePlayerASelect = document.getElementById("tradePlayerASelect");
+    const tradeTeamBSelect = document.getElementById("tradeTeamBSelect");
+    const tradePlayerBSelect = document.getElementById("tradePlayerBSelect");
+    const tradeSwapBtn = document.getElementById("tradeSwapBtn");
+    const tradeStatus = document.getElementById("tradeStatus");
 
     const tabButtons = document.querySelectorAll(".tab-btn");
-    const tabPanels = { setup: document.getElementById("tab-setup"), squads: document.getElementById("tab-squads"), sim: document.getElementById("tab-sim"), stats: document.getElementById("tab-stats") };
+    const tabPanels = {
+      setup: document.getElementById("tab-setup"),
+      squads: document.getElementById("tab-squads"),
+      auction: document.getElementById("tab-auction"),
+      sim: document.getElementById("tab-sim"),
+      stats: document.getElementById("tab-stats")
+    };
 
     function switchToTab(tab){
       tabButtons.forEach(b=>b.classList.remove("active"));
@@ -551,20 +583,79 @@ function clamp(value, min, max){
       if(!currentRoomData || !currentRoomId){
         onlineRoomStatus.textContent = "No room connected yet.";
         onlineRoomMembers.textContent = "";
+        renderAuctionPresence();
+        renderAuctionChat();
         return;
       }
       const viewerUid = getCurrentGuestUser() && getCurrentGuestUser().uid;
       const isHost = viewerUid && currentRoomData.hostUid === viewerUid;
       const roomState = currentRoomData.gameState || null;
-      const memberNames = Array.isArray(currentRoomData.members)
-        ? currentRoomData.members.map(member => `${member.name}${member.uid === currentRoomData.hostUid ? " (Host)" : ""}`)
-        : [];
+      const memberNames = getOrderedRoomMembers().map(member => `${member.name}${member.uid === currentRoomData.hostUid ? " (Host)" : ""}${isRoomMemberOnline(member) ? " online" : " away"}`);
       const settings = currentRoomData.settings || {};
       const turnName = roomState && roomState.gameStarted && Array.isArray(roomState.players) && roomState.players[roomState.currentPlayerIndex]
         ? roomState.players[roomState.currentPlayerIndex].name
         : "";
       onlineRoomStatus.textContent = `Room ${currentRoomId} connected. Role: ${isHost ? "Host" : "Player"}. Status: ${currentRoomData.status || "lobby"}. Setup: ${settings.numPlayers || "-"} players, max ${settings.maxPlayersPerTeam || "-"} per team.${turnName ? ` Turn: ${turnName}.` : ""}`;
       onlineRoomMembers.textContent = memberNames.length ? `Players in room: ${memberNames.join(", ")}` : "No players in room yet.";
+      renderAuctionPresence();
+      renderAuctionChat();
+    }
+    function isRoomMemberOnline(member){
+      const lastSeen = Date.parse((member && member.lastSeenAt) || (member && member.joinedAt) || "") || 0;
+      return Date.now() - lastSeen < 45000;
+    }
+    function renderAuctionPresence(){
+      if(!auctionPresence) return;
+      auctionPresence.innerHTML = "";
+      if(!currentRoomData || !currentRoomId){
+        auctionPresence.innerHTML = '<div class="empty-state">Join a room to see devices.</div>';
+        if(hostTransferSelect) hostTransferSelect.innerHTML = "";
+        if(hostTransferBtn) hostTransferBtn.disabled = true;
+        return;
+      }
+      const members = getOrderedRoomMembers();
+      members.forEach(member=>{
+        const row = document.createElement("div");
+        row.className = "auction-item";
+        row.innerHTML = `<strong>${member.name}${member.uid === currentRoomData.hostUid ? " (Host)" : ""}</strong><div>${isRoomMemberOnline(member) ? "Online" : "Away"}${member.uid ? ` | ${member.uid.slice(0, 8)}` : ""}</div>`;
+        auctionPresence.appendChild(row);
+      });
+      if(hostTransferSelect){
+        const prev = hostTransferSelect.value;
+        hostTransferSelect.innerHTML = "";
+        members.forEach(member=>{
+          const opt = document.createElement("option");
+          opt.value = member.uid || "";
+          opt.textContent = member.name || "Player";
+          hostTransferSelect.appendChild(opt);
+        });
+        if(Array.from(hostTransferSelect.options).some(opt=>opt.value === prev)) hostTransferSelect.value = prev;
+      }
+      if(hostTransferBtn) hostTransferBtn.disabled = !isCurrentUserHost() || members.length < 2;
+    }
+    function renderAuctionChat(){
+      if(!auctionChatList) return;
+      auctionChatList.innerHTML = "";
+      const messages = currentRoomData && Array.isArray(currentRoomData.chatMessages) ? currentRoomData.chatMessages.slice(-30) : [];
+      if(!messages.length){
+        auctionChatList.innerHTML = '<div class="empty-state">No messages yet.</div>';
+        return;
+      }
+      messages.forEach(message=>{
+        const row = document.createElement("div");
+        row.className = "auction-chat-msg";
+        row.innerHTML = `<strong>${message.name || "Player"}</strong>: ${String(message.text || "").replace(/[<>&]/g, ch=>({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[ch]))}`;
+        auctionChatList.appendChild(row);
+      });
+      auctionChatList.scrollTop = auctionChatList.scrollHeight;
+    }
+    function touchRoomPresence(){
+      if(!currentRoomId) return;
+      updateRoomPresence(currentRoomId, getOnlineIdentityName()).catch(()=>{});
+    }
+    function startPresenceLoop(){
+      if(presenceInterval) return;
+      presenceInterval = window.setInterval(touchRoomPresence, 20000);
     }
     function isCurrentUserHost(){
       const viewerUid = getCurrentGuestUser() && getCurrentGuestUser().uid;
@@ -661,12 +752,17 @@ function clamp(value, min, max){
     }
     function syncRoomGameState(reason = ""){
       if(!currentRoomId || applyingRemoteRoomState) return;
-      updateRoomGameState(currentRoomId, serializeRoomGameState()).catch((err)=>{
+      const outgoingState = serializeRoomGameState();
+      lastAppliedRoomGameStateJson = JSON.stringify(outgoingState);
+      updateRoomGameState(currentRoomId, outgoingState).catch((err)=>{
         setFirebaseStatus(`Room sync failed${reason ? ` during ${reason}` : ""}: ${err.message}`, "error");
       });
     }
     function applyRoomGameState(roomState){
       if(!roomState || typeof roomState !== "object") return;
+      const incomingStateJson = JSON.stringify(roomState);
+      if(incomingStateJson === lastAppliedRoomGameStateJson) return;
+      lastAppliedRoomGameStateJson = incomingStateJson;
       applyingRemoteRoomState = true;
       try{
         players = Array.isArray(roomState.players) ? roomState.players : [];
@@ -730,6 +826,7 @@ function clamp(value, min, max){
       }
       currentRoomId = roomId || "";
       currentRoomData = null;
+      lastAppliedRoomGameStateJson = "";
       if(roomCodeInput) roomCodeInput.value = currentRoomId;
       if(!currentRoomId){
         renderOnlineRoomState();
@@ -953,6 +1050,7 @@ function clamp(value, min, max){
     }
     function getAuctionRoleBucket(role){
       const baseRole = getBaseRole(role);
+      if(baseRole === "WK") return "WK";
       if(baseRole === "AR") return "AR";
       if(baseRole === "BOWL") return "BOWL";
       return "BAT";
@@ -972,11 +1070,37 @@ function clamp(value, min, max){
     function getAuctionControlledTeam(){
       if(!players || !Array.isArray(players)) return null;
       const viewerUid = getCurrentGuestUser() && getCurrentGuestUser().uid;
+      const selectedBidder = auctionBidAsSelect ? auctionBidAsSelect.value : "";
+      if(selectedBidder && (!currentRoomId || isCurrentUserHost())){
+        return players.find(team=>team && team.name === selectedBidder) || null;
+      }
       const identityName = getOnlineIdentityName().toLowerCase();
       return players.find(team=>{
         if(viewerUid && team.ownerUid && team.ownerUid === viewerUid) return true;
         return identityName && team.name && team.name.toLowerCase() === identityName;
       }) || null;
+    }
+    function renderAuctionBidAsSelect(){
+      if(!auctionBidAsSelect) return;
+      const previous = auctionBidAsSelect.value;
+      auctionBidAsSelect.innerHTML = "";
+      (players || []).forEach(team=>{
+        const opt = document.createElement("option");
+        opt.value = team.name;
+        opt.textContent = team.name;
+        auctionBidAsSelect.appendChild(opt);
+      });
+      const canUseSharedDevice = !currentRoomId || isCurrentUserHost();
+      auctionBidAsSelect.disabled = !canUseSharedDevice || !players || players.length === 0;
+      if(Array.from(auctionBidAsSelect.options).some(opt=>opt.value === previous)){
+        auctionBidAsSelect.value = previous;
+      } else {
+        const controlled = players.find(team=>{
+          const uid = getCurrentGuestUser() && getCurrentGuestUser().uid;
+          return uid && team.ownerUid === uid;
+        });
+        if(controlled) auctionBidAsSelect.value = controlled.name;
+      }
     }
     function getAuctionBidIncrement(currentBid){
       const bid = Number(currentBid) || 0;
@@ -1010,14 +1134,29 @@ function clamp(value, min, max){
     function getAuctionBasePrice(setType, rating){
       if(setType === "Marquee Players") return rating >= 9 ? 200 : 150;
       if(setType === "All-Rounders") return rating >= 8.5 ? 150 : 100;
+      if(setType === "Wicketkeepers") return rating >= 8.5 ? 125 : 75;
       if(setType === "Capped Batsmen") return rating >= 8.5 ? 125 : 75;
       if(setType === "Capped Bowlers") return rating >= 8.5 ? 125 : 75;
       return rating >= 7.8 ? 40 : 20;
     }
-    function buildAuctionLots(){
+    function getAuctionSetNames(){
+      return ["Marquee Players", "Wicketkeepers", "Capped Batsmen", "Capped Bowlers", "All-Rounders", "Uncapped Players"];
+    }
+    function getManualAuctionSetOrder(){
+      const raw = auctionSetOrderSelect ? auctionSetOrderSelect.value : "";
+      const valid = new Set(getAuctionSetNames());
+      const order = String(raw || "").split(",").map(value=>value.trim()).filter(value=>valid.has(value));
+      return order.length ? order : getAuctionSetNames();
+    }
+    function getSelectedAuctionSet(){
+      const selected = auctionSetSelect ? auctionSetSelect.value : "All Sets";
+      return selected || "All Sets";
+    }
+    function buildAuctionLots(selectedSet = "All Sets", excludedNames = new Set()){
       const seen = new Set();
       const buckets = {
         "Marquee Players": [],
+        "Wicketkeepers": [],
         "Capped Batsmen": [],
         "Capped Bowlers": [],
         "All-Rounders": [],
@@ -1026,6 +1165,7 @@ function clamp(value, min, max){
       Object.entries(IPL_PLAYERS).forEach(([teamCode, squad])=>{
         (squad || []).forEach(player=>{
           if(seen.has(player.name)) return;
+          if(excludedNames.has(player.name)) return;
           seen.add(player.name);
           const roleBucket = getAuctionRoleBucket(player.role);
           const rating = getPlayerRating(player.name, player.role);
@@ -1033,6 +1173,8 @@ function clamp(value, min, max){
           let setType = "Uncapped Players";
           if(FORM_PLAYERS.has(player.name) || rating >= 8.9){
             setType = "Marquee Players";
+          } else if(roleBucket === "WK"){
+            setType = "Wicketkeepers";
           } else if(roleBucket === "AR"){
             setType = "All-Rounders";
           } else if(capped && roleBucket === "BAT"){
@@ -1053,13 +1195,11 @@ function clamp(value, min, max){
           });
         });
       });
-      return [
-        ...shuffleArray(buckets["Marquee Players"]),
-        ...shuffleArray(buckets["Capped Batsmen"]),
-        ...shuffleArray(buckets["Capped Bowlers"]),
-        ...shuffleArray(buckets["All-Rounders"]),
-        ...shuffleArray(buckets["Uncapped Players"])
-      ];
+      const setNames = getAuctionSetNames();
+      if(selectedSet && selectedSet !== "All Sets" && buckets[selectedSet]){
+        return shuffleArray(buckets[selectedSet]);
+      }
+      return setNames.flatMap(setName=>shuffleArray(buckets[setName]));
     }
     function getAuctionTeamCounts(squad){
       return (squad || []).reduce((acc, player)=>{
@@ -1067,7 +1207,7 @@ function clamp(value, min, max){
         acc[bucket] = (acc[bucket] || 0) + 1;
         if(player.isOverseas) acc.overseas += 1;
         return acc;
-      }, { BAT: 0, BOWL: 0, AR: 0, overseas: 0 });
+      }, { BAT: 0, BOWL: 0, AR: 0, WK: 0, overseas: 0 });
     }
     function canAuctionTeamAddPlayer(team, lot, bidAmount){
       if(!team || !lot) return { ok: false, reason: "Team not found." };
@@ -1079,24 +1219,44 @@ function clamp(value, min, max){
       nextCounts[lot.roleBucket] = (nextCounts[lot.roleBucket] || 0) + 1;
       if(lot.isOverseas) nextCounts.overseas += 1;
       const slotsLeft = 18 - ((team.squad || []).length + 1);
-      const missing = Math.max(0, 5 - nextCounts.BAT) + Math.max(0, 5 - nextCounts.BOWL) + Math.max(0, 2 - nextCounts.AR);
+      const missing = Math.max(0, 4 - nextCounts.BAT) + Math.max(0, 5 - nextCounts.BOWL) + Math.max(0, 2 - nextCounts.AR) + Math.max(0, 1 - nextCounts.WK);
       if(missing > slotsLeft){
         return { ok: false, reason: "This bid would make the minimum squad balance impossible." };
       }
       return { ok: true, reason: "" };
     }
-    function createInitialAuctionState(){
+    function getAuctionCompletedPlayerNames(existingState = auctionState){
+      const names = new Set();
+      (players || []).forEach(team=>{
+        (team.squad || []).forEach(player=>{
+          if(player && (player.playerName || player.name)) names.add(player.playerName || player.name);
+        });
+      });
+      if(existingState){
+        (existingState.soldLots || []).forEach(lot=>{ if(lot && lot.name) names.add(lot.name); });
+        (existingState.unsoldLots || []).forEach(lot=>{ if(lot && lot.name) names.add(lot.name); });
+      }
+      return names;
+    }
+    function createInitialAuctionState(selectedSet = "All Sets", previousState = null){
+      const excludedNames = previousState ? getAuctionCompletedPlayerNames(previousState) : new Set();
+      const lots = buildAuctionLots(selectedSet, excludedNames);
+      const setOrder = getManualAuctionSetOrder();
       return {
         status: "idle",
-        lots: buildAuctionLots(),
+        selectedSet,
+        setOrder,
+        setOrderIndex: Math.max(0, setOrder.indexOf(selectedSet)),
+        availableSets: getAuctionSetNames(),
+        lots,
         currentIndex: -1,
         currentLot: null,
         currentBid: 0,
         highestBidder: "",
         highestBidderUid: "",
         bidHistory: [],
-        soldLots: [],
-        unsoldLots: [],
+        soldLots: previousState && Array.isArray(previousState.soldLots) ? previousState.soldLots : [],
+        unsoldLots: previousState && Array.isArray(previousState.unsoldLots) ? previousState.unsoldLots : [],
         endAt: 0,
         timerSeconds: 55
       };
@@ -1113,6 +1273,10 @@ function clamp(value, min, max){
     }
     function moveToNextAuctionLot(autoStart = true){
       if(!auctionState) return;
+      if(auctionSaleTimeout){
+        window.clearTimeout(auctionSaleTimeout);
+        auctionSaleTimeout = null;
+      }
       const nextIndex = (Number.isFinite(auctionState.currentIndex) ? auctionState.currentIndex : -1) + 1;
       const nextLot = Array.isArray(auctionState.lots) ? auctionState.lots[nextIndex] : null;
       auctionState.currentIndex = nextIndex;
@@ -1129,6 +1293,7 @@ function clamp(value, min, max){
     function finalizeAuctionLot(reason = "timer"){
       if(!auctionState || !auctionState.currentLot) return;
       const lot = auctionState.currentLot;
+      let saleMessage = `${lot.name} is unsold at ${formatAuctionPrice(lot.basePrice)}.`;
       if(auctionState.highestBidder){
         const team = (players || []).find(entry=>entry.name === auctionState.highestBidder);
         if(team){
@@ -1152,6 +1317,7 @@ function clamp(value, min, max){
             price: auctionState.currentBid,
             reason
           });
+          saleMessage = `SOLD: ${lot.name} to ${team.name} for ${formatAuctionPrice(auctionState.currentBid)}.`;
         }
       } else {
         auctionState.unsoldLots.push({
@@ -1160,9 +1326,16 @@ function clamp(value, min, max){
           reason
         });
       }
-      moveToNextAuctionLot(true);
+      auctionState.status = "sold-animation";
+      auctionState.saleMessage = saleMessage;
+      auctionState.endAt = 0;
+      renderAuctionState();
+      syncRoomGameState("auction-sale");
+      if(canCurrentDeviceControlAuctionAdmin()){
+        auctionSaleTimeout = window.setTimeout(()=>moveToNextAuctionLot(true), 2400);
+      }
     }
-    function placeAuctionBid(){
+    function placeAuctionBid(customIncrement = null){
       if(!auctionState || !auctionState.currentLot || auctionState.status !== "running") return;
       const team = getAuctionControlledTeam();
       if(!team){
@@ -1170,7 +1343,7 @@ function clamp(value, min, max){
         return;
       }
       const bidAmount = auctionState.currentBid > 0
-        ? auctionState.currentBid + getAuctionBidIncrement(auctionState.currentBid)
+        ? auctionState.currentBid + (customIncrement || getAuctionBidIncrement(auctionState.currentBid))
         : auctionState.currentLot.basePrice;
       const canBid = canAuctionTeamAddPlayer(team, auctionState.currentLot, bidAmount);
       if(!canBid.ok){
@@ -1191,10 +1364,33 @@ function clamp(value, min, max){
       renderAuctionState();
       syncRoomGameState("auction-bid");
     }
+    function renderAuctionPlayerProfile(lot){
+      if(!auctionPlayerProfile) return;
+      if(!lot){
+        auctionPlayerProfile.className = "auction-profile empty-state";
+        auctionPlayerProfile.textContent = "Player profile appears when a lot is active.";
+        return;
+      }
+      const rating = getPlayerRating(lot.name, lot.role);
+      const form = getCurrentFormScore(lot.name, lot.role);
+      const tags = [
+        formatRole(lot.role),
+        lot.team,
+        lot.isOverseas ? "Overseas" : "Indian",
+        lot.capped ? "Capped" : "Uncapped",
+        isPlayerInForm(lot.name, lot.role) ? "In form" : "Steady"
+      ];
+      const imported = getImportedPlayerProfile(lot.name, lot.role);
+      const batting = imported && imported.batting ? `Bat avg ${imported.batting.average}, SR ${imported.batting.strikeRate}` : "Bat profile estimated";
+      const bowling = imported && imported.bowling ? `Bowl econ ${imported.bowling.economy}, WPM ${imported.bowling.wicketsPerMatch}` : "Bowl profile estimated";
+      auctionPlayerProfile.className = "auction-profile";
+      auctionPlayerProfile.innerHTML = `<strong>Profile</strong><div class="auction-team-stats">${tags.map(tag=>`<span class="auction-mini-chip">${tag}</span>`).join("")}</div><div class="small-text">Rating ${rating.toFixed(1)} | Form ${form}</div><div class="small-text">${batting} | ${bowling}</div>`;
+    }
     function renderAuctionState(){
       if(!auctionStatusLine) return;
       startAuctionTimerLoop();
       if(!auctionState){
+        renderAuctionBidAsSelect();
         auctionStatusLine.textContent = "Create teams in Setup, then initialize auction.";
         if(auctionPlayerName) auctionPlayerName.textContent = "No current player";
         if(auctionPlayerMeta) auctionPlayerMeta.textContent = "Current lot details will appear here.";
@@ -1209,11 +1405,32 @@ function clamp(value, min, max){
         if(auctionLeaderboard) auctionLeaderboard.innerHTML = '<div class="empty-state">Initialize auction to view teams.</div>';
         if(auctionTeamsBoard) auctionTeamsBoard.innerHTML = '<div class="empty-state">Auction squads will appear here.</div>';
         if(auctionBidBtn) auctionBidBtn.disabled = true;
+        [auctionBid10Btn, auctionBid25Btn, auctionBid50Btn, auctionBid100Btn].forEach(btn=>{ if(btn) btn.disabled = true; });
+        if(auctionEndBtn) auctionEndBtn.disabled = true;
+        if(auctionSaleBanner) auctionSaleBanner.style.display = "none";
+        renderAuctionPlayerProfile(null);
+        if(auctionSetSelect) auctionSetSelect.disabled = false;
+        if(auctionSetOrderSelect) auctionSetOrderSelect.disabled = false;
+        renderTradeWindow();
         return;
       }
       const lot = auctionState.currentLot;
+      renderAuctionBidAsSelect();
+      if(auctionSetSelect){
+        auctionSetSelect.value = auctionState.selectedSet || "All Sets";
+        auctionSetSelect.disabled = auctionState.status === "running";
+      }
+      if(auctionSetOrderSelect) auctionSetOrderSelect.disabled = auctionState.status === "running";
+      if(auctionSaleBanner){
+        if(auctionState.saleMessage && (auctionState.status === "sold-animation" || auctionState.status === "ended")){
+          auctionSaleBanner.textContent = auctionState.saleMessage;
+          auctionSaleBanner.style.display = "block";
+        } else {
+          auctionSaleBanner.style.display = "none";
+        }
+      }
       auctionStatusLine.textContent = lot
-        ? `Status: ${auctionState.status}. Lot ${Math.max(1, auctionState.currentIndex + 1)} of ${(auctionState.lots || []).length}.`
+        ? `Status: ${auctionState.status}. ${auctionState.selectedSet || "All Sets"} lot ${Math.max(1, auctionState.currentIndex + 1)} of ${(auctionState.lots || []).length}.`
         : `Status: ${auctionState.status}. Sold ${auctionState.soldLots.length}, Unsold ${auctionState.unsoldLots.length}.`;
       if(auctionPlayerAvatar) auctionPlayerAvatar.textContent = lot ? getAuctionAvatar(lot.name) : "DONE";
       if(auctionSetBadge) auctionSetBadge.textContent = lot ? lot.setType : "Auction complete";
@@ -1223,15 +1440,19 @@ function clamp(value, min, max){
       if(auctionCurrentBid) auctionCurrentBid.textContent = auctionState.currentBid ? formatAuctionPrice(auctionState.currentBid) : "No bid";
       if(auctionHighestBidder) auctionHighestBidder.textContent = auctionState.highestBidder || "-";
       if(auctionTimer) auctionTimer.textContent = String(getAuctionTimerRemaining()).padStart(2, "0");
+      renderAuctionPlayerProfile(lot);
       const controlledTeam = getAuctionControlledTeam();
       if(auctionBidBtn){
         auctionBidBtn.disabled = !(lot && auctionState.status === "running" && controlledTeam);
         const nextBid = lot ? (auctionState.currentBid > 0 ? auctionState.currentBid + getAuctionBidIncrement(auctionState.currentBid) : lot.basePrice) : 0;
         auctionBidBtn.textContent = lot ? `Bid ${formatAuctionPrice(nextBid)}` : "Auction Closed";
       }
+      [auctionBid10Btn, auctionBid25Btn, auctionBid50Btn, auctionBid100Btn].forEach(btn=>{
+        if(btn) btn.disabled = !(lot && auctionState.status === "running" && controlledTeam);
+      });
       if(auctionBidHint){
-        if(!controlledTeam) auctionBidHint.textContent = "Join with your team name on this device to bid.";
-        else if(lot) auctionBidHint.textContent = `${controlledTeam.name} purse: ${formatAuctionPrice(controlledTeam.purse)}.`;
+        if(!controlledTeam) auctionBidHint.textContent = currentRoomId && !isCurrentUserHost() ? "This device can bid only for its joined team." : "Choose a team in Bid as to play auction from one device.";
+        else if(lot) auctionBidHint.textContent = `${controlledTeam.name} purse: ${formatAuctionPrice(controlledTeam.purse)}. Change Bid as for pass-and-play.`;
         else auctionBidHint.textContent = "Auction complete.";
       }
       if(auctionBidHistory){
@@ -1281,7 +1502,7 @@ function clamp(value, min, max){
           const counts = getAuctionTeamCounts(team.squad || []);
           const row = document.createElement("div");
           row.className = "auction-team-card";
-          row.innerHTML = `<div class="auction-team-top"><strong>${team.name}</strong><span>${formatAuctionPrice(team.purse)}</span></div><div class="auction-team-stats"><span class="auction-mini-chip">${(team.squad || []).length}/18</span><span class="auction-mini-chip">BAT ${counts.BAT}</span><span class="auction-mini-chip">BOWL ${counts.BOWL}</span><span class="auction-mini-chip">AR ${counts.AR}</span><span class="auction-mini-chip">OS ${counts.overseas}/8</span></div>`;
+          row.innerHTML = `<div class="auction-team-top"><strong>${team.name}</strong><span>${formatAuctionPrice(team.purse)}</span></div><div class="auction-team-stats"><span class="auction-mini-chip">${(team.squad || []).length}/18</span><span class="auction-mini-chip">BAT ${counts.BAT}</span><span class="auction-mini-chip">WK ${counts.WK}</span><span class="auction-mini-chip">BOWL ${counts.BOWL}</span><span class="auction-mini-chip">AR ${counts.AR}</span><span class="auction-mini-chip">OS ${counts.overseas}/8</span></div>`;
           auctionLeaderboard.appendChild(row);
         });
       }
@@ -1292,14 +1513,86 @@ function clamp(value, min, max){
           const row = document.createElement("div");
           row.className = "auction-team-card";
           const squadList = (team.squad || []).slice(-8).reverse().map(player=>`<div>${player.playerName || player.name} <span class="small-text">(${formatRole(player.role)} | ${formatAuctionPrice(player.price)})</span></div>`).join("");
-          row.innerHTML = `<div class="auction-team-top"><strong>${team.name}</strong><span>${formatAuctionPrice(team.totalSpent || 0)} spent</span></div><div class="auction-team-stats"><span class="auction-mini-chip">Purse ${formatAuctionPrice(team.purse)}</span><span class="auction-mini-chip">BAT ${counts.BAT}</span><span class="auction-mini-chip">BOWL ${counts.BOWL}</span><span class="auction-mini-chip">AR ${counts.AR}</span><span class="auction-mini-chip">Overseas ${counts.overseas}</span></div><div class="auction-squad-list">${squadList || '<div class="small-text">No players yet.</div>'}</div>`;
+          row.innerHTML = `<div class="auction-team-top"><strong>${team.name}</strong><span>${formatAuctionPrice(team.totalSpent || 0)} spent</span></div><div class="auction-team-stats"><span class="auction-mini-chip">Purse ${formatAuctionPrice(team.purse)}</span><span class="auction-mini-chip">BAT ${counts.BAT}</span><span class="auction-mini-chip">WK ${counts.WK}</span><span class="auction-mini-chip">BOWL ${counts.BOWL}</span><span class="auction-mini-chip">AR ${counts.AR}</span><span class="auction-mini-chip">Overseas ${counts.overseas}</span></div><div class="auction-squad-list">${squadList || '<div class="small-text">No players yet.</div>'}</div>`;
           auctionTeamsBoard.appendChild(row);
         });
       }
       if(auctionInitBtn) auctionInitBtn.disabled = !(players && players.length >= 2);
-      if(auctionStartBtn) auctionStartBtn.disabled = !canCurrentDeviceControlAuctionAdmin() || !lot || auctionState.status === "running";
+      if(auctionNextSetBtn) auctionNextSetBtn.disabled = !canCurrentDeviceControlAuctionAdmin() || !auctionState || auctionState.status === "running" || auctionState.status === "sold-animation";
+      if(auctionStartBtn) auctionStartBtn.disabled = !canCurrentDeviceControlAuctionAdmin() || !lot || auctionState.status === "running" || auctionState.status === "sold-animation";
       if(auctionPauseBtn) auctionPauseBtn.disabled = !canCurrentDeviceControlAuctionAdmin() || auctionState.status !== "running";
-      if(auctionNextBtn) auctionNextBtn.disabled = !canCurrentDeviceControlAuctionAdmin() || (!lot && auctionState.status === "completed");
+      if(auctionNextBtn) auctionNextBtn.disabled = !canCurrentDeviceControlAuctionAdmin() || auctionState.status === "sold-animation" || (!lot && auctionState.status === "completed");
+      if(auctionEndBtn) auctionEndBtn.disabled = !canCurrentDeviceControlAuctionAdmin() || !auctionState || auctionState.status === "ended";
+      renderTradeWindow();
+    }
+    function fillTradePlayerSelect(teamSelect, playerSelect){
+      if(!teamSelect || !playerSelect) return;
+      const idx = parseInt(teamSelect.value, 10);
+      const team = players[idx];
+      const prev = playerSelect.value;
+      playerSelect.innerHTML = "";
+      if(!team || !Array.isArray(team.squad) || team.squad.length === 0){
+        const opt = document.createElement("option");
+        opt.value = "";
+        opt.textContent = "No players";
+        playerSelect.appendChild(opt);
+        return;
+      }
+      team.squad.forEach((player, playerIndex)=>{
+        const opt = document.createElement("option");
+        opt.value = String(playerIndex);
+        opt.textContent = `${player.playerName || player.name} (${formatRole(player.role)})`;
+        playerSelect.appendChild(opt);
+      });
+      if(Array.from(playerSelect.options).some(opt=>opt.value === prev)) playerSelect.value = prev;
+    }
+    function renderTradeWindow(){
+      if(!tradeTeamASelect || !tradeTeamBSelect || !tradePlayerASelect || !tradePlayerBSelect) return;
+      const prevA = tradeTeamASelect.value;
+      const prevB = tradeTeamBSelect.value;
+      tradeTeamASelect.innerHTML = "";
+      tradeTeamBSelect.innerHTML = "";
+      (players || []).forEach((team, idx)=>{
+        const opt = document.createElement("option");
+        opt.value = String(idx);
+        opt.textContent = team.name;
+        tradeTeamASelect.appendChild(opt);
+        tradeTeamBSelect.appendChild(opt.cloneNode(true));
+      });
+      if(Array.from(tradeTeamASelect.options).some(opt=>opt.value === prevA)) tradeTeamASelect.value = prevA;
+      if(Array.from(tradeTeamBSelect.options).some(opt=>opt.value === prevB)) tradeTeamBSelect.value = prevB;
+      if(!tradeTeamBSelect.value && players[1]) tradeTeamBSelect.value = "1";
+      fillTradePlayerSelect(tradeTeamASelect, tradePlayerASelect);
+      fillTradePlayerSelect(tradeTeamBSelect, tradePlayerBSelect);
+      if(tradeSwapBtn) tradeSwapBtn.disabled = !canCurrentDeviceControlAuctionAdmin() || !players || players.length < 2;
+    }
+    function swapTradePlayers(){
+      if(!canCurrentDeviceControlAuctionAdmin()) return;
+      const idxA = parseInt(tradeTeamASelect.value, 10);
+      const idxB = parseInt(tradeTeamBSelect.value, 10);
+      const playerAIdx = parseInt(tradePlayerASelect.value, 10);
+      const playerBIdx = parseInt(tradePlayerBSelect.value, 10);
+      if(!players[idxA] || !players[idxB] || idxA === idxB){
+        if(tradeStatus) tradeStatus.textContent = "Choose two different teams.";
+        return;
+      }
+      const squadA = players[idxA].squad || [];
+      const squadB = players[idxB].squad || [];
+      if(!squadA[playerAIdx] || !squadB[playerBIdx]){
+        if(tradeStatus) tradeStatus.textContent = "Choose one player from each team.";
+        return;
+      }
+      const a = squadA[playerAIdx];
+      const b = squadB[playerBIdx];
+      squadA[playerAIdx] = b;
+      squadB[playerBIdx] = a;
+      players[idxA].playing = null;
+      players[idxB].playing = null;
+      if(tradeStatus) tradeStatus.textContent = `${a.playerName || a.name} swapped with ${b.playerName || b.name}.`;
+      renderPlayers();
+      renderAuctionState();
+      populateSimSelects();
+      syncRoomGameState("trade-swap");
     }
     function updateBestSquadSummary(){ if(!players||players.length===0){ bestSquadEl.textContent=""; return; } let best=null, bestScore=-Infinity; players.forEach(p=>{ if(!p.squad||p.squad.length===0) return; const eff=getEffectiveSquad(p); const sc=getSquadStrength(eff); if(sc>bestScore){bestScore=sc;best=p.name;} }); if(!best) bestSquadEl.textContent="No squads rated yet."; else bestSquadEl.textContent=`Current best ${isAuctionMode() ? "auction squad" : "squad"} (based on XI if set): ${best} (${bestScore} pts)`; }
 
@@ -1477,6 +1770,8 @@ function clamp(value, min, max){
             settings: collectSetupSettings()
           });
           subscribeToCurrentRoom(roomId);
+          touchRoomPresence();
+          startPresenceLoop();
           setFirebaseStatus(`Room ${roomId} created. Share this code with other players.`, "success");
         }catch(err){
           setFirebaseStatus(`Could not create room: ${err.message}`, "error");
@@ -1491,6 +1786,8 @@ function clamp(value, min, max){
           joinRoomBtn.disabled = true;
           const roomId = await joinRoom(roomCodeInput && roomCodeInput.value, onlinePlayerNameInput && onlinePlayerNameInput.value);
           subscribeToCurrentRoom(roomId);
+          touchRoomPresence();
+          startPresenceLoop();
           setFirebaseStatus(`Joined room ${roomId}.`, "success");
         }catch(err){
           setFirebaseStatus(`Could not join room: ${err.message}`, "error");
@@ -1502,6 +1799,7 @@ function clamp(value, min, max){
     if(onlinePlayerNameInput){
       onlinePlayerNameInput.addEventListener("input", ()=>{
         if(currentRoomId && !applyingRemoteRoomState){
+          touchRoomPresence();
           spinButton.disabled = !gameStarted || !canCurrentDeviceControlTurn();
           updateGameStatus();
           renderOnlineRoomState();
@@ -1514,15 +1812,33 @@ function clamp(value, min, max){
         applyModeUI();
       });
     }
-    if(auctionInitBtn){
-      auctionInitBtn.addEventListener("click", ()=>{
-        if(!players || players.length < 2){
-          if(auctionStatusLine) auctionStatusLine.textContent = "Create at least 2 teams first.";
+    if(auctionSetSelect){
+      auctionSetSelect.addEventListener("change", ()=>{
+        if(auctionState && auctionState.status === "running"){
+          auctionSetSelect.value = auctionState.selectedSet || "All Sets";
           return;
         }
-        if(!canCurrentDeviceControlAuctionAdmin()) return;
-        currentGameMode = "auction";
-        if(gameModeSelect) gameModeSelect.value = "auction";
+        if(auctionStatusLine){
+          auctionStatusLine.textContent = `Selected set: ${getSelectedAuctionSet()}. Initialize auction to load those players in random order.`;
+        }
+      });
+    }
+    if(auctionSetOrderSelect){
+      auctionSetOrderSelect.addEventListener("change", ()=>{
+        if(auctionState && auctionState.status === "running") return;
+        if(auctionStatusLine) auctionStatusLine.textContent = "Set order updated. Use Load Next Set or Initialize Auction.";
+      });
+    }
+    function loadAuctionSet(selectedSet, preserveAuction = true){
+      if(!players || players.length < 2){
+        if(auctionStatusLine) auctionStatusLine.textContent = "Create at least 2 teams first.";
+        return;
+      }
+      if(!canCurrentDeviceControlAuctionAdmin()) return;
+      currentGameMode = "auction";
+      if(gameModeSelect) gameModeSelect.value = "auction";
+      const previousAuctionState = preserveAuction ? auctionState : null;
+      if(!previousAuctionState){
         players.forEach(team=>{
           team.squad = [];
           team.playing = null;
@@ -1530,14 +1846,30 @@ function clamp(value, min, max){
           team.totalSpent = 0;
         });
         latestPicks = [];
-        auctionState = createInitialAuctionState();
-        moveToNextAuctionLot(false);
-        renderPlayers();
-        populateSimSelects();
-        applyModeUI();
-        renderAuctionState();
-        syncRoomGameState("auction-init");
+      }
+      auctionState = createInitialAuctionState(selectedSet, previousAuctionState);
+      moveToNextAuctionLot(false);
+      renderPlayers();
+      populateSimSelects();
+      applyModeUI();
+      renderAuctionState();
+      syncRoomGameState("auction-init");
+    }
+    function loadNextManualAuctionSet(){
+      const order = getManualAuctionSetOrder();
+      const current = auctionState && auctionState.selectedSet ? auctionState.selectedSet : null;
+      const currentIdx = current ? order.indexOf(current) : -1;
+      const nextSet = order[(currentIdx + 1 + order.length) % order.length];
+      if(auctionSetSelect) auctionSetSelect.value = nextSet;
+      loadAuctionSet(nextSet, true);
+    }
+    if(auctionInitBtn){
+      auctionInitBtn.addEventListener("click", ()=>{
+        loadAuctionSet(getSelectedAuctionSet(), !!auctionState);
       });
+    }
+    if(auctionNextSetBtn){
+      auctionNextSetBtn.addEventListener("click", ()=>loadNextManualAuctionSet());
     }
     if(auctionStartBtn){
       auctionStartBtn.addEventListener("click", ()=>{
@@ -1557,6 +1889,21 @@ function clamp(value, min, max){
         syncRoomGameState("auction-pause");
       });
     }
+    if(auctionEndBtn){
+      auctionEndBtn.addEventListener("click", ()=>{
+        if(!auctionState || !canCurrentDeviceControlAuctionAdmin()) return;
+        if(auctionSaleTimeout){
+          window.clearTimeout(auctionSaleTimeout);
+          auctionSaleTimeout = null;
+        }
+        auctionState.status = "ended";
+        auctionState.currentLot = null;
+        auctionState.endAt = 0;
+        auctionState.saleMessage = "Auction ended. Squads are ready for XI selection, trades, and matches.";
+        renderAuctionState();
+        syncRoomGameState("auction-end");
+      });
+    }
     if(auctionNextBtn){
       auctionNextBtn.addEventListener("click", ()=>{
         if(!auctionState || !canCurrentDeviceControlAuctionAdmin()) return;
@@ -1570,6 +1917,54 @@ function clamp(value, min, max){
     if(auctionBidBtn){
       auctionBidBtn.addEventListener("click", ()=> placeAuctionBid());
     }
+    if(auctionBidAsSelect){
+      auctionBidAsSelect.addEventListener("change", ()=>renderAuctionState());
+    }
+    if(auctionBid10Btn) auctionBid10Btn.addEventListener("click", ()=>placeAuctionBid(10));
+    if(auctionBid25Btn) auctionBid25Btn.addEventListener("click", ()=>placeAuctionBid(25));
+    if(auctionBid50Btn) auctionBid50Btn.addEventListener("click", ()=>placeAuctionBid(50));
+    if(auctionBid100Btn) auctionBid100Btn.addEventListener("click", ()=>placeAuctionBid(100));
+    if(hostTransferBtn){
+      hostTransferBtn.addEventListener("click", async ()=>{
+        try{
+          if(!currentRoomId || !hostTransferSelect || !hostTransferSelect.value) return;
+          await transferRoomHost(currentRoomId, hostTransferSelect.value);
+          setFirebaseStatus("Host transferred.", "success");
+        }catch(err){
+          setFirebaseStatus(`Host transfer failed: ${err.message}`, "error");
+        }
+      });
+    }
+    async function sendAuctionChat(text){
+      try{
+        if(!currentRoomId){
+          if(auctionChatList) auctionChatList.innerHTML = '<div class="empty-state">Join a room to chat.</div>';
+          return;
+        }
+        await sendRoomChatMessage(currentRoomId, text);
+        if(auctionChatInput) auctionChatInput.value = "";
+      }catch(err){
+        setFirebaseStatus(`Chat failed: ${err.message}`, "error");
+      }
+    }
+    if(auctionChatSendBtn){
+      auctionChatSendBtn.addEventListener("click", ()=>sendAuctionChat(auctionChatInput && auctionChatInput.value));
+    }
+    if(auctionChatInput){
+      auctionChatInput.addEventListener("keydown", event=>{
+        if(event.key === "Enter"){
+          event.preventDefault();
+          sendAuctionChat(auctionChatInput.value);
+        }
+      });
+    }
+    document.querySelectorAll(".auction-reaction-btn").forEach(btn=>{
+      btn.addEventListener("click", ()=>sendAuctionChat(btn.dataset.message || btn.textContent));
+    });
+    [tradeTeamASelect, tradeTeamBSelect].forEach(sel=>{
+      if(sel) sel.addEventListener("change", ()=>renderTradeWindow());
+    });
+    if(tradeSwapBtn) tradeSwapBtn.addEventListener("click", ()=>swapTradePlayers());
 
     setupForm.addEventListener("submit", e=>{
       e.preventDefault();

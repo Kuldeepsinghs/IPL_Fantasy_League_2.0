@@ -115,10 +115,27 @@
                 <div id="auctionStatusLine" class="small-text">Create teams in Setup, then initialize auction.</div>
               </div>
               <div class="auction-admin-actions">
+                <select id="auctionSetSelect" aria-label="Auction set">
+                  <option value="All Sets">All Sets</option>
+                  <option value="Marquee Players">Marquee Players</option>
+                  <option value="Wicketkeepers">Wicketkeepers</option>
+                  <option value="Capped Batsmen">Capped Batsmen</option>
+                  <option value="Capped Bowlers">Capped Bowlers</option>
+                  <option value="All-Rounders">All-Rounders</option>
+                  <option value="Uncapped Players">Uncapped Players</option>
+                </select>
+                <select id="auctionSetOrderSelect" aria-label="Auction set order">
+                  <option value="Marquee Players,Wicketkeepers,Capped Batsmen,Capped Bowlers,All-Rounders,Uncapped Players">Default Order</option>
+                  <option value="Marquee Players,All-Rounders,Wicketkeepers,Capped Batsmen,Capped Bowlers,Uncapped Players">All-Rounders Early</option>
+                  <option value="Wicketkeepers,Marquee Players,Capped Batsmen,All-Rounders,Capped Bowlers,Uncapped Players">WK First</option>
+                  <option value="Uncapped Players,Capped Bowlers,Capped Batsmen,Wicketkeepers,All-Rounders,Marquee Players">Reverse Order</option>
+                </select>
+                <button id="auctionNextSetBtn" type="button" class="small-btn">Load Next Set</button>
                 <button id="auctionInitBtn" type="button" class="small-btn">Initialize Auction</button>
                 <button id="auctionStartBtn" type="button" class="small-btn">Start</button>
                 <button id="auctionPauseBtn" type="button" class="small-btn">Pause</button>
                 <button id="auctionNextBtn" type="button" class="small-btn">Next Lot</button>
+                <button id="auctionEndBtn" type="button" class="small-btn">End Auction</button>
               </div>
             </div>
 
@@ -150,9 +167,19 @@
                 </div>
               </div>
               <div class="auction-bid-actions">
+                <label class="auction-bid-as-label" for="auctionBidAsSelect">
+                  <span class="small-text">Bid as</span>
+                  <select id="auctionBidAsSelect" aria-label="Bid as team"></select>
+                </label>
                 <button id="auctionBidBtn" type="button">Place Next Bid</button>
+                <button id="auctionBid10Btn" type="button" class="small-btn">+10L</button>
+                <button id="auctionBid25Btn" type="button" class="small-btn">+25L</button>
+                <button id="auctionBid50Btn" type="button" class="small-btn">+50L</button>
+                <button id="auctionBid100Btn" type="button" class="small-btn">+1Cr</button>
                 <div id="auctionBidHint" class="small-text">Join from each device with the team name you control to bid live.</div>
               </div>
+              <div id="auctionSaleBanner" class="auction-sale-banner" style="display:none"></div>
+              <div id="auctionPlayerProfile" class="auction-profile empty-state">Player profile appears when a lot is active.</div>
             </div>
 
             <div class="auction-panels">
@@ -175,6 +202,39 @@
             <div class="auction-panel">
               <h4>Team Squads</h4>
               <div id="auctionTeamsBoard" class="auction-list empty-state">Auction squads will appear here.</div>
+            </div>
+            <div class="auction-panel">
+              <h4>Live Presence</h4>
+              <div id="auctionPresence" class="auction-list empty-state">Join a room to see devices.</div>
+              <div class="sim-row">
+                <select id="hostTransferSelect"></select>
+                <button id="hostTransferBtn" type="button" class="small-btn">Transfer Host</button>
+              </div>
+            </div>
+            <div class="auction-panel">
+              <h4>Auction Chat</h4>
+              <div id="auctionChatList" class="auction-chat-list empty-state">No messages yet.</div>
+              <div class="sim-row">
+                <input id="auctionChatInput" type="text" placeholder="Message or reaction" maxlength="160" />
+                <button id="auctionChatSendBtn" type="button" class="small-btn">Send</button>
+              </div>
+              <div class="auction-reactions">
+                <button type="button" class="small-btn auction-reaction-btn" data-message="Steal!">Steal!</button>
+                <button type="button" class="small-btn auction-reaction-btn" data-message="Too much!">Too much!</button>
+                <button type="button" class="small-btn auction-reaction-btn" data-message="Need him!">Need him!</button>
+              </div>
+            </div>
+            <div class="auction-panel">
+              <h4>Trade Window</h4>
+              <div class="small-text">Swap one player from each team after or during the auction.</div>
+              <div class="trade-grid">
+                <select id="tradeTeamASelect"></select>
+                <select id="tradePlayerASelect"></select>
+                <select id="tradeTeamBSelect"></select>
+                <select id="tradePlayerBSelect"></select>
+              </div>
+              <button id="tradeSwapBtn" type="button" class="small-btn">Swap Players</button>
+              <div id="tradeStatus" class="small-text"></div>
             </div>
           </div>
         </div>

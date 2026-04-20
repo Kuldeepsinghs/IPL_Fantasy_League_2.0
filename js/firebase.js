@@ -62,6 +62,7 @@ export async function createRoom({ hostName, settings }){
         uid: user.uid,
         name: safeHostName,
         joinedAt: new Date().toISOString(),
+        lastSeenAt: new Date().toISOString(),
         isHost: true
       }]
     });
@@ -86,6 +87,7 @@ export async function joinRoom(roomId, playerName){
       uid: user.uid,
       name: safePlayerName,
       joinedAt: existingIdx >= 0 ? (members[existingIdx].joinedAt || new Date().toISOString()) : new Date().toISOString(),
+      lastSeenAt: new Date().toISOString(),
       isHost: data.hostUid === user.uid
     };
     if(existingIdx >= 0) members[existingIdx] = nextMember;
@@ -96,6 +98,80 @@ export async function joinRoom(roomId, playerName){
     });
   });
   return safeRoomId;
+}
+
+export async function updateRoomPresence(roomId, playerName){
+  const user = await ensureGuestSession();
+  const safeRoomId = cleanRoomCode(roomId);
+  if(!safeRoomId) throw new Error("Missing room code.");
+  const roomRef = doc(db, "rooms", safeRoomId);
+  await runTransaction(db, async (transaction)=>{
+    const snap = await transaction.get(roomRef);
+    if(!snap.exists()) throw new Error("Room not found.");
+    const data = snap.data() || {};
+    const members = Array.isArray(data.members) ? data.members.slice() : [];
+    const idx = members.findIndex(member => member && member.uid === user.uid);
+    const safeName = String(playerName || (idx >= 0 ? members[idx].name : "Player")).trim() || "Player";
+    const nextMember = {
+      uid: user.uid,
+      name: safeName,
+      joinedAt: idx >= 0 ? (members[idx].joinedAt || new Date().toISOString()) : new Date().toISOString(),
+      lastSeenAt: new Date().toISOString(),
+      isHost: data.hostUid === user.uid
+    };
+    if(idx >= 0) members[idx] = nextMember;
+    else members.push(nextMember);
+    transaction.update(roomRef, { members, updatedAt: serverTimestamp() });
+  });
+}
+
+export async function transferRoomHost(roomId, targetUid){
+  const user = await ensureGuestSession();
+  const safeRoomId = cleanRoomCode(roomId);
+  if(!safeRoomId) throw new Error("Missing room code.");
+  const roomRef = doc(db, "rooms", safeRoomId);
+  await runTransaction(db, async (transaction)=>{
+    const snap = await transaction.get(roomRef);
+    if(!snap.exists()) throw new Error("Room not found.");
+    const data = snap.data() || {};
+    if(data.hostUid !== user.uid) throw new Error("Only the host can transfer host.");
+    const members = Array.isArray(data.members) ? data.members.map(member=>({
+      ...member,
+      isHost: member && member.uid === targetUid
+    })) : [];
+    const target = members.find(member=>member && member.uid === targetUid);
+    if(!target) throw new Error("Target player is not in this room.");
+    transaction.update(roomRef, {
+      hostUid: targetUid,
+      hostName: target.name || "Host",
+      members,
+      updatedAt: serverTimestamp()
+    });
+  });
+}
+
+export async function sendRoomChatMessage(roomId, message){
+  const user = await ensureGuestSession();
+  const safeRoomId = cleanRoomCode(roomId);
+  if(!safeRoomId) throw new Error("Missing room code.");
+  const text = String(message || "").trim().slice(0, 160);
+  if(!text) return;
+  const roomRef = doc(db, "rooms", safeRoomId);
+  await runTransaction(db, async (transaction)=>{
+    const snap = await transaction.get(roomRef);
+    if(!snap.exists()) throw new Error("Room not found.");
+    const data = snap.data() || {};
+    const members = Array.isArray(data.members) ? data.members : [];
+    const member = members.find(item=>item && item.uid === user.uid);
+    const chatMessages = Array.isArray(data.chatMessages) ? data.chatMessages.slice(-39) : [];
+    chatMessages.push({
+      uid: user.uid,
+      name: member && member.name ? member.name : "Player",
+      text,
+      at: new Date().toISOString()
+    });
+    transaction.update(roomRef, { chatMessages, updatedAt: serverTimestamp() });
+  });
 }
 
 export async function updateRoomSettings(roomId, settings){
